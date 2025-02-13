@@ -3,6 +3,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import make_pipeline
 import pickle
 
 app = Flask(__name__)
@@ -16,7 +18,7 @@ def init_db():
         password="yourpassword"
     )
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS preferences (id SERIAL PRIMARY KEY, question TEXT, answer TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS preferences (id SERIAL PRIMARY KEY, question TEXT, answer TEXT, justification TEXT)''')
     conn.commit()
     cursor.close()
     conn.close()
@@ -33,12 +35,25 @@ def train_model():
     conn.close()
 
     if not df.empty:
-        X = df['question']
+        X = df[['question', 'justification']]
         y = df['answer']
+
+        # Combine question and justification into a single text feature
+        X['text'] = X['question'] + " " + X['justification']
+
+        # Vectorize the text data
+        vectorizer = TfidfVectorizer()
+        X_vec = vectorizer.fit_transform(X['text'])
+
+        # Train the model
         model = RandomForestClassifier()
-        model.fit(X, y)
+        model.fit(X_vec, y)
+
+        # Save the model and vectorizer
         with open('model.pkl', 'wb') as f:
             pickle.dump(model, f)
+        with open('vectorizer.pkl', 'wb') as f:
+            pickle.dump(vectorizer, f)
 
 @app.route('/ask', methods=['GET'])
 def ask_question():
@@ -50,6 +65,7 @@ def get_answer():
     data = request.get_json()
     question = data['question']
     answer = data['answer']
+    justification = data.get('justification', '')
 
     conn = psycopg2.connect(
         host="db",
@@ -58,7 +74,7 @@ def get_answer():
         password="yourpassword"
     )
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO preferences (question, answer) VALUES (%s, %s)", (question, answer))
+    cursor.execute("INSERT INTO preferences (question, answer, justification) VALUES (%s, %s, %s)", (question, answer, justification))
     conn.commit()
     cursor.close()
     conn.close()
@@ -71,11 +87,17 @@ def get_answer():
 def predict():
     data = request.get_json()
     question = data['question']
+    justification = data.get('justification', '')
 
     with open('model.pkl', 'rb') as f:
         model = pickle.load(f)
+    with open('vectorizer.pkl', 'rb') as f:
+        vectorizer = pickle.load(f)
 
-    prediction = model.predict([question])
+    text = question + " " + justification
+    text_vec = vectorizer.transform([text])
+
+    prediction = model.predict(text_vec)
 
     return jsonify({'prediction': prediction[0]})
 
